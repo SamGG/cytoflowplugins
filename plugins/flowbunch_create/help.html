@@ -1,0 +1,20 @@
+<h3>Create flowBunch</h3>
+<p>Scans a folder of FCS files and creates a <b>flowBunch</b> object (package <i>cytoElements</i>) with its
+phenotype table (<i>pheno</i>) and panel table (<i>panel</i>). The report shows both tables, the cell count
+per file and the acquisition timeline.</p>
+<ul>
+<li><b>FCS folder</b>: folder holding the <i>.fcs</i> files (not searched recursively). <b>From step…</b> lists the
+folders of the previous steps that hold FCS files, for instance the split FCS files of a
+<i>Split concatenated FCS</i> step. The next Browse starts in the parent of the last folder you picked,
+so that a neighbouring folder is easy to choose.</li>
+<li><b>flowBunch name</b>: proposed from the folder name until you type one.</li>
+<li><b>Cytometer</b>: flow, spectral, mass or none.</li>
+<li><b>Language for date</b>: language passed to <i>fb_update_pheno_dates</i> for the dates of the files
+(English, French, German, Italian, Spanish, Portuguese or Dutch).</li>
+<li><b>Cofactor</b>: optional. Empty means the default of the cytometer.</li>
+<li><b>Test mode</b>: builds the object and the report without writing the flowBunch file.</li>
+</ul>
+<h4>Output</h4>
+<p>The step folder (<i>&lt;id&gt;_&lt;label&gt;</i>) holds <i>data/</i> with the flowBunch file, to continue 
+the analysis in later steps, <i>flowbunch_create_report.html</i>, <i>console.log</i>, 
+<i>run_parameters.json</i> and <i>session_info.txt</i>.</p>

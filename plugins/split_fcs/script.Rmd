@@ -1,0 +1,386 @@
+---
+title: "Split concatenated FCS"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+params:
+  params_file: ""
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+suppressPackageStartupMessages({
+  library(flowCore)
+  library(data.table)
+})
+
+# ---- parameters written by cytoflowgui -----------------------------------
+cfg <- jsonlite::read_json(params$params_file, simplifyVector = TRUE)
+
+# ---- helpers --------------------------------------------------------------
+# shared helpers of cytoflowgui: log_msg, note, as_chr, safe_name, ...
+source(file.path(cfg$helpers_dir, "helpers.R"), local = TRUE)
+
+strip_fcs <- function(x) {
+  sub("\\.fcs$", "", x, ignore.case = TRUE)
+}
+
+# folders of the step, given by cytoflowgui: data = FCS to continue the
+# analysis, reports = tables (created when needed)
+step_dir <- cfg$step_dir
+data_dir <- cfg$data_dir
+reports_dir <- cfg$reports_dir
+rel_path <- function(x) substring(x, nchar(step_dir) + 2)
+stem <- safe_name(tools::file_path_sans_ext(basename(cfg$fcs_file)))
+formats <- tolower(as_chr(cfg$table_formats))
+split_mode <- if (is.null(cfg$split_mode)) "none" else cfg$split_mode
+```
+
+```{r read, include=FALSE}
+# ---- read the FCS --------------------------------------------------------
+log_msg("Reading %s", basename(cfg$fcs_file))
+ff <- flowCore::read.FCS(
+  cfg$fcs_file, transformation = FALSE, truncate_max_range = FALSE,
+  emptyValue = FALSE
+)
+mat <- flowCore::exprs(ff)
+pars <- flowCore::parameters(ff)@data
+channels <- as.character(pars$name)
+desc <- as.character(pars$desc)
+
+for (ch in c(cfg$file_channel, cfg$cluster_channel)) {
+  if (!ch %in% colnames(mat)) {
+    stop(sprintf("Channel '%s' not found in the FCS file", ch))
+  }
+}
+
+# markers = channel marker names ($PnS); without any, channel names are used
+has_desc <- !is.na(desc) & nzchar(desc)
+all_markers <- if (any(has_desc)) {
+  data.frame(marker = desc[has_desc], channel = channels[has_desc])
+} else {
+  data.frame(marker = channels, channel = channels)
+}
+is_key <- all_markers$channel %in% c(cfg$file_channel, cfg$cluster_channel)
+all_markers <- all_markers[!is_key, , drop = FALSE]
+
+# an empty selection means all markers
+resolve_markers <- function(sel, what) {
+  sel <- as_chr(sel)
+  if (!length(sel)) {
+    return(all_markers)
+  }
+  pick <- function(m) {
+    i <- match(tolower(m), tolower(all_markers$marker))
+    if (is.na(i)) {
+      i <- match(tolower(m), tolower(all_markers$channel))
+    }
+    i
+  }
+  idx <- vapply(sel, pick, integer(1))
+  if (anyNA(idx)) {
+    stop(
+      sprintf(
+        "%s: marker(s) not found in the FCS file: %s",
+        what, paste(sel[is.na(idx)], collapse = ", ")
+      )
+    )
+  }
+  all_markers[unique(idx), , drop = FALSE]
+}
+markers_heat <- resolve_markers(cfg$mfi_heatmap_markers, "Heatmap markers")
+markers_rep <- resolve_markers(cfg$mfi_report_markers, "Report markers")
+markers_heat$label <- make.unique(markers_heat$marker)
+markers_rep$label <- make.unique(markers_rep$marker)
+
+# cells: keep a row index so that FCS subsets can be written later
+ok <- !is.na(mat[, cfg$file_channel]) & !is.na(mat[, cfg$cluster_channel])
+if (!all(ok)) {
+  note("%d cells without file or cluster value were ignored", sum(!ok))
+}
+use_ch <- unique(c(markers_heat$channel, markers_rep$channel))
+dt <- as.data.table(
+  mat[ok, c(cfg$file_channel, cfg$cluster_channel, use_ch), drop = FALSE]
+)
+setnames(dt, c(".file", ".cluster", use_ch))
+dt[, .file := as.integer(round(.file))]
+dt[, .cluster := as.integer(round(.cluster))]
+dt[, .row := which(ok)]
+log_msg("%d cells, %d markers", nrow(dt), length(use_ch))
+```
+
+```{r mappings, include=FALSE}
+# ---- file and cluster names ----------------------------------------------
+# column 1 = integer number, column 2 = name
+read_simple_map <- function(path) {
+  if (tolower(tools::file_ext(path)) %in% c("xlsx", "xlsm")) {
+    x <- as.data.frame(
+      readxl::read_excel(
+        path, sheet = 1, col_names = FALSE, col_types = "text"
+      )
+    )
+  } else {
+    first <- readLines(path, n = 1, warn = FALSE)
+    seps <- c(",", ";", "\t")
+    n_sep <- vapply(
+      seps,
+      function(s) nchar(first) - nchar(gsub(s, "", first, fixed = TRUE)),
+      1L
+    )
+    sep <- if (max(n_sep) == 0) "," else seps[which.max(n_sep)]
+    x <- utils::read.table(
+      path, sep = sep, header = FALSE, quote = "\"", comment.char = "",
+      fill = TRUE, stringsAsFactors = FALSE, colClasses = "character",
+      fileEncoding = "UTF-8-BOM"
+    )
+  }
+  if (ncol(x) < 2) {
+    stop(sprintf("%s: at least two columns are expected", basename(path)))
+  }
+  no <- suppressWarnings(as.numeric(x[[1]]))
+  keep <- !is.na(no) & no == round(no)   # a header row is dropped here
+  data.frame(
+    no = as.integer(no[keep]),
+    name = trimws(as.character(x[[2]][keep]))
+  )
+}
+
+file_map <- NULL
+if (!is.null(cfg$file_map_file)) {
+  if (identical(cfg$file_map_format, "simple")) {
+    file_map <- read_simple_map(cfg$file_map_file)
+  } else {
+    df <- as.data.frame(
+      readxl::read_excel(cfg$file_map_file, sheet = cfg$file_map_sheet)
+    )
+    file_map <- data.frame(
+      no = as.integer(df[[cfg$file_map_id_column]]),
+      name = trimws(as.character(df[[cfg$file_name_column]]))
+    )
+  }
+}
+
+cluster_map <- NULL
+if (!is.null(cfg$cluster_map_file)) {
+  if (identical(cfg$cluster_map_format, "simple")) {
+    cluster_map <- read_simple_map(cfg$cluster_map_file)
+  } else {
+    df <- as.data.frame(
+      readxl::read_excel(cfg$cluster_map_file, sheet = cfg$cluster_map_sheet)
+    )
+    names(df) <- tolower(trimws(names(df)))
+    in_clustering <- trimws(as.character(df$clustering_id)) ==
+      cfg$cluster_channel
+    df <- df[in_clustering, , drop = FALSE]
+    cluster_map <- data.frame(
+      no = as.integer(df$cluster_no),
+      name = trimws(as.character(df$cluster_name))
+    )
+  }
+}
+
+# one row per number found in the data; unmapped numbers keep their number
+make_labels <- function(ids, map, what, prefix) {
+  ids <- sort(unique(ids))
+  nm <- rep(NA_character_, length(ids))
+  if (!is.null(map)) {
+    map <- map[!is.na(map$no) & !duplicated(map$no), , drop = FALSE]
+    nm <- map$name[match(ids, map$no)]
+  }
+  bad <- is.na(nm) | !nzchar(nm)
+  if (!is.null(map) && any(bad)) {
+    note(
+      "%s without a name in the mapping: %s",
+      what, paste(ids[bad], collapse = ", ")
+    )
+  }
+  nm[bad] <- as.character(ids[bad])
+  tag <- if (is.null(map)) {
+    paste0(prefix, "_", ids)
+  } else {
+    paste0(prefix, "_", ids, "_", safe_name(strip_fcs(nm)))
+  }
+  data.frame(no = ids, name = make.unique(nm), tag = make.unique(tag))
+}
+fl <- make_labels(dt$.file, file_map, "File numbers", "file")
+cl <- make_labels(dt$.cluster, cluster_map, "Cluster numbers", "cluster")
+log_msg("%d files, %d clusters", nrow(fl), nrow(cl))
+```
+
+```{r tables, include=FALSE}
+# ---- tables ---------------------------------------------------------------
+cluster_cols <- function(no) {
+  data.frame(cluster_no = no, cluster_name = cl$name[match(no, cl$no)])
+}
+
+# 1-2. cluster x markers (heatmap markers, all files pooled)
+heat_ch <- markers_heat$channel
+by_cluster <- function(fun) {
+  r <- dt[, lapply(.SD, fun), by = ".cluster", .SDcols = heat_ch]
+  setorderv(r, ".cluster")
+  m <- as.data.frame(r[, heat_ch, with = FALSE])
+  names(m) <- markers_heat$label
+  cbind(cluster_cols(r$.cluster), m)
+}
+tab_mfi <- by_cluster(function(v) median(v, na.rm = TRUE))
+tab_iqr <- by_cluster(function(v) IQR(v, na.rm = TRUE))
+
+# 3-4. cluster x files: cell counts and frequencies (% of each file's cells)
+cnt <- dt[, .N, by = c(".cluster", ".file")]
+count_m <- matrix(0L, nrow(cl), nrow(fl))
+count_m[cbind(match(cnt$.cluster, cl$no), match(cnt$.file, fl$no))] <- cnt$N
+freq_m <- sweep(count_m, 2, colSums(count_m), "/") * 100
+to_tab <- function(m) {
+  x <- as.data.frame(m)
+  names(x) <- fl$name
+  cbind(cluster_cols(cl$no), x)
+}
+tab_count <- to_tab(count_m)
+tab_freq <- to_tab(freq_m)
+
+# 5. (cluster x marker) x files: MFI of the report markers
+rep_ch <- markers_rep$channel
+mm <- dt[
+  , lapply(.SD, median, na.rm = TRUE),
+  by = c(".cluster", ".file"), .SDcols = rep_ch
+]
+long <- melt(
+  mm, id.vars = c(".cluster", ".file"), measure.vars = rep_ch,
+  variable.name = "channel", value.name = "mfi", variable.factor = FALSE
+)
+rows <- data.frame(
+  cluster_no = rep(cl$no, each = nrow(markers_rep)),
+  marker = rep(markers_rep$label, times = nrow(cl)),
+  channel = rep(markers_rep$channel, times = nrow(cl))
+)
+rows$cluster_name <- cl$name[match(rows$cluster_no, cl$no)]
+rep_m <- matrix(NA_real_, nrow(rows), nrow(fl))
+ri <- match(
+  paste(long$.cluster, long$channel, sep = "\r"),
+  paste(rows$cluster_no, rows$channel, sep = "\r")
+)
+rep_m[cbind(ri, match(long$.file, fl$no))] <- long$mfi
+tab_rep <- as.data.frame(rep_m)
+names(tab_rep) <- fl$name
+tab_rep <- cbind(rows[, c("cluster_no", "cluster_name", "marker")], tab_rep)
+
+tables <- list(
+  "MFI cluster x marker" = tab_mfi,
+  "IQR cluster x marker" = tab_iqr,
+  "Count cluster x file" = tab_count,
+  "Freq (%) cluster x file" = tab_freq,
+  "MFI (cluster x marker) x file" = tab_rep
+)
+
+# ---- write the tables: one XLSX (one tab per table), and/or one TSV each ---
+outputs <- character(0)
+if (length(formats)) {
+  dir.create(reports_dir, recursive = TRUE, showWarnings = FALSE)
+}
+if ("xlsx" %in% formats) {
+  f <- file.path(reports_dir, paste0(stem, "_tables.xlsx"))
+  writexl::write_xlsx(tables, f)
+  outputs <- c(outputs, f)
+  log_msg("Wrote %s", basename(f))
+}
+if ("tsv" %in% formats) {
+  d <- file.path(reports_dir, paste0(stem, "_tables_tsv"))
+  dir.create(d, showWarnings = FALSE)
+  for (n in names(tables)) {
+    tsv_name <- gsub("\\s+", "_", safe_name(gsub("[()%]", "", n)))
+    data.table::fwrite(
+      tables[[n]], file.path(d, paste0(tsv_name, ".tsv")), sep = "\t"
+    )
+  }
+  outputs <- c(outputs, d)
+  log_msg("Wrote TSV tables in %s", basename(d))
+}
+```
+
+```{r split, include=FALSE}
+# ---- split the FCS --------------------------------------------------------
+n_fcs <- 0L
+if (split_mode != "none") {
+  root <- data_dir
+  dir.create(root, recursive = TRUE, showWarnings = FALSE)
+  by <- switch(
+    split_mode,
+    file = ".file",
+    cluster = ".cluster",
+    c(".file", ".cluster")
+  )
+  g <- dt[, list(rows = list(.row)), by = by]
+  ftag <- function(no) fl$tag[match(no, fl$no)]
+  ctag <- function(no) cl$tag[match(no, cl$no)]
+  g$path <- switch(
+    split_mode,
+    file = file.path(root, paste0(ftag(g$.file), ".fcs")),
+    cluster = file.path(root, paste0(ctag(g$.cluster), ".fcs")),
+    cluster_file = file.path(
+      root, ctag(g$.cluster), paste0(ftag(g$.file), ".fcs")
+    ),
+    file_cluster = file.path(
+      root, ftag(g$.file), paste0(ctag(g$.cluster), ".fcs")
+    ),
+    stop(sprintf("Unknown split mode: %s", split_mode))
+  )
+  log_msg("Writing %d FCS files", nrow(g))
+  step <- max(1L, nrow(g) %/% 10L)
+  for (k in seq_len(nrow(g))) {
+    dir.create(dirname(g$path[k]), recursive = TRUE, showWarnings = FALSE)
+    flowCore::write.FCS(ff[g$rows[[k]], ], g$path[k])
+    if (k %% step == 0L || k == nrow(g)) {
+      log_msg("  %d/%d", k, nrow(g))
+    }
+  }
+  n_fcs <- nrow(g)
+  outputs <- c(outputs, root)
+}
+write_session_info(cfg)
+```
+
+## Summary
+
+```{r summary}
+info <- step_info(
+  cfg, "fcs_file",
+  c(
+    "FCS file" = cfg$fcs_file, "Cells" = format(nrow(dt), big.mark = ","),
+    "Files" = nrow(fl), "Clusters" = nrow(cl),
+    "File channel" = cfg$file_channel,
+    "Cluster channel" = cfg$cluster_channel,
+    "Heatmap markers" = paste(markers_heat$marker, collapse = ", "),
+    "Report markers" = paste(markers_rep$marker, collapse = ", "),
+    "Split mode" = split_mode, "FCS files written" = n_fcs,
+    "Step folder" = step_dir
+  )
+)
+knitr::kable(info)
+```
+
+```{r notes, results='asis'}
+print_notes()
+```
+
+## Output
+
+```{r outputs, results='asis'}
+cat(paste0("- `", rel_path(outputs), "`\n"), sep = "")
+```
+
+## Tables
+
+Frequencies are percentages of the cells of each file. MFI is the median
+intensity and IQR the interquartile range, both computed on the values stored
+in the FCS file. Only the first rows are shown.
+
+```{r preview, results='asis'}
+for (n in names(tables)) {
+  cat("\n### ", n, "\n\n", sep = "")
+  print(knitr::kable(utils::head(tables[[n]], 10), digits = 2))
+}
+```
+
+```{r footer, child = file.path(cfg$helpers_dir, "footer.Rmd")}
+```

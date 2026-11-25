@@ -1,0 +1,261 @@
+---
+title: "Create flowBunch Object"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    code_folding: hide
+    code_download: true
+params:
+  params_file: ""
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE, message = FALSE, warning = FALSE,
+  fig.width = 10, fig.height = 6
+)
+```
+
+```{r load config and validate, include=FALSE}
+# ---- Load configuration --------------------------------------------------
+cfg <- jsonlite::read_json(params$params_file, simplifyVector = TRUE)
+# shared helpers of cytoflowgui: log_msg, with_log, note, is_text, ...
+source(file.path(cfg$helpers_dir, "helpers.R"), local = TRUE)
+log_msg("Configuration loaded")
+# ---- Validate configuration ----------------------------------------------
+log_msg("Validating configuration...")
+stopifnot(
+  "fb_name must be a non-empty string" = is_text(cfg$fb_name),
+  "fcs_dir must be a non-empty string" = is_text(cfg$fcs_dir),
+  "data_dir must be given by cytoflowgui" = is_text(cfg$data_dir),
+  "cytometer must be one of: flow, spectral, mass, none" =
+    isTRUE(cfg$cytometer %in% c("flow", "spectral", "mass", "none")),
+  "language must be a non-empty string" = is_text(cfg$language),
+  "test_mode must be TRUE or FALSE" = is_flag(cfg$test_mode)
+)
+log_msg("Configuration validated successfully")
+```
+
+## Processing
+
+```{r load_packages}
+log_msg("Loading required packages...")
+suppressPackageStartupMessages({
+  library(cytoElements)
+  library(ggplot2)
+  library(knitr)
+  library(lubridate)
+})
+```
+
+```{r scan_fcs}
+# ---- Scan FCS files -------------------------------------------------------
+fcs_dir <- normalizePath(cfg$fcs_dir, mustWork = TRUE)
+fcs_files <- list_fcs_files(fcs_dir)
+
+# the flowBunch is created in the data folder of the step
+fb_dir <- cfg$data_dir
+dir.create(fb_dir, recursive = TRUE, showWarnings = FALSE)
+fb_dir <- normalizePath(fb_dir, mustWork = FALSE)
+```
+
+```{r init_flowbunch}
+# ---- Initialize flowBunch object -----------------------------------------
+log_msg("Creating flowBunch object: %s", cfg$fb_name)
+
+# Prepare parameters for fb_initiate
+init_params <- list(
+  project_name = cfg$fb_name,
+  project_dir = fb_dir,
+  fcs_dir = fcs_dir,
+  cytometer = cfg$cytometer
+)
+
+# optional cofactor (the default of the cytometer is used when empty)
+if (!is.null(cfg$cofactor) && !identical(cfg$cofactor, "")) {
+  init_params$cofactor <- cfg$cofactor
+}
+
+# Create flowBunch object
+fb <- with_log(do.call(fb_initiate, init_params))
+
+if (is.null(fb)) {
+  stop("fb_initiate returned NULL, see the console for details.")
+}
+
+fb <- with_log(fb_update_pheno_dates(fb, lang = cfg$language))
+
+if (is.null(fb)) {
+  stop("fb_initiate returned NULL, see the console for details.")
+}
+
+log_msg("flowBunch object created successfully")
+log_msg("Pheno rows: %d, Panel rows: %d", nrow(fb@pheno), nrow(fb@panel))
+```
+
+```{r save_flowbunch}
+# ---- Save flowBunch object -----------------------------------------------
+# done before the plots: an error in a plot cannot lose the flowBunch
+if (!cfg$test_mode) {
+  log_msg("Writing flowBunch to disk...")
+  with_log(fb_write(fb))
+  log_msg("Saved to: %s", fb_file_path(fb))
+} else {
+  log_msg("Test mode, not writing to disk")
+  log_msg("flowBunch file path would be: %s", fb_file_path(fb))
+}
+write_session_info(cfg)
+```
+
+## Summary
+
+```{r ignore errors from now, echo=FALSE}
+# ---- From here on, only the report is left -----------------------------------
+# The flowBunch is saved, so an error in a report chunk must not fail the step:
+# it is kept in the report, written to the GUI console, and the next chunks run.
+# Earlier chunks (validation, scan, init, save) still stop the render on error.
+report_only_from_here()
+```
+
+```{r summary, echo=FALSE, class.source='fold-show bg-warning'}
+info <- step_info(
+  cfg, "fcs_dir",
+  c(
+    "flowBunch name" = cfg$fb_name, "Cytometer" = cfg$cytometer,
+    "FCS files" = length(fcs_files), "Pheno rows" = nrow(fb@pheno),
+    "Panel rows" = nrow(fb@panel),
+    "Test mode" = ifelse(cfg$test_mode, "Yes", "No"),
+    "File path" = fb_file_path(fb)
+  )
+)
+knitr::kable(info)
+```
+
+```{r notes, results='asis'}
+if ("acq_date" %in% colnames(fb@pheno)) {
+  timeline_df <- data.frame(
+    File = basename(row.names(fb@pheno)),
+    Date = as.Date(fb@pheno$acq_date),
+    Cells = fb@pheno$TOT
+  )
+  if (any(is.na(timeline_df$Date))) {
+    note("Some files lack valid acquisition dates")
+  }
+} else {
+  note("The pheno table lacks the 'acq_date' column")
+  timeline_df <- NULL
+}
+print_notes()
+```
+
+## Output
+
+```{r output, results='asis'}
+if (cfg$test_mode) {
+  cat("- test mode: the flowBunch was not written\n")
+} else {
+  cat(paste0("- `", fb_file_path(fb), "`\n"), sep = "")
+}
+```
+
+## Tables
+
+### Pheno table
+
+```{r pheno, results='asis', echo=FALSE}
+print(knitr::kable(head(fb@pheno, 20), digits = 2,
+  caption = "Pheno Table (first 20 rows)"))
+```
+
+### Panel table
+
+```{r panel, results='asis', echo=FALSE}
+print(knitr::kable(fb@panel, digits = 2,
+  caption = "Panel Table"))
+```
+
+## Plots
+
+### Cell counts per file
+
+```{r cell_counts}
+counts_df <- data.frame(
+  File = basename(fb@pheno$sample_id),
+  Cells = fb@pheno$TOT
+)
+
+ggplot(counts_df, aes(x = reorder(File, -Cells), y = Cells)) +
+  geom_col(fill = "#2E9ECE", alpha = 0.8) +
+  coord_flip() +
+  labs(
+    title = "Cell Counts Per File",
+    x = "File",
+    y = "Total Cell Count (TOT)"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    axis.text.x = element_text(size = 8)
+  )
+```
+
+### Acquisition timeline: cell counts
+
+```{r timeline check}
+if (is.null(timeline_df)) {
+  skip_timeline <- TRUE
+} else {
+  timeline_df <- timeline_df[!is.na(timeline_df$Date), ]
+  skip_timeline <- nrow(timeline_df) == 0
+}
+
+if (skip_timeline) {
+  log_msg("Timeline plots skipped due to missing or invalid dates")
+}
+```
+
+```{r timeline cell counts}
+if (!skip_timeline) {
+  ggplot(timeline_df, aes(x = Date, y = Cells)) +
+    geom_point(size = 3, alpha = 0.8, color = "#2E9ECE") +
+    coord_flip() +
+    geom_line(aes(group = Date), color = "grey60", alpha = 0.5) +
+    labs(
+      title = "Acquisition Timeline",
+      x = "Acquisition Date",
+      y = "Total Cell Count (TOT)"
+    ) +
+    scale_x_datetime(date_labels = "%Y-%m-%d") +
+    theme_minimal() +
+    theme(plot.title = element_text(hjust = 0.5, face = "bold")) +
+    guides(color = "none")
+
+}
+```
+
+### Acquisition timeline: file counts
+
+```{r timeline file counts}
+if (!skip_timeline) {
+  ggplot(timeline_df, aes(x = as.Date(Date))) +
+    geom_bar(fill = "#2E9ECE", alpha = 0.8) +
+    geom_text(
+      aes(label = after_stat(count)), stat = "count",
+      hjust = -0.3, size = 3) +
+    coord_flip() +
+    labs(
+      title = "Acquisition Timeline",
+      x = "Acquisition Date",
+      y = "Number of FCS files"
+    ) +
+    scale_x_date(date_labels = "%Y-%m-%d") +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
+    theme_minimal() +
+    theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+}
+```
+
+```{r footer, child = file.path(cfg$helpers_dir, "footer.Rmd")}
+```

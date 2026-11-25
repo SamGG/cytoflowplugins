@@ -1,0 +1,55 @@
+<h3>Split concatenated FCS</h3>
+<p>Parses a <b>concatenated FCS file</b> (cells from several files merged together and
+clustered), extracts features and exports cells as FCS files.</p>
+<ul>
+<li><b>Concatenated FCS file</b>: the clustered file. Channels are read from its header. The
+folder of the file you pick is remembered and proposed next time.</li>
+<li><b>File channel</b>: integer channel identifying the original FCS file. Proposed: first channel matching
+<i>sample_no</i>, then <i>sample</i>, then <i>file_no</i>.</li>
+<li><b>File mapping (XLSX/CSV, optional)</b>: gives the original FCS file name of each file number.
+Two layouts are recognised. If the file is named like the file channel (e.g. <i>file_no.csv</i> or
+<i>file_no.xlsx</i>), its first column is the integer number and its second column the name. Otherwise the
+file must be an XLSX: its <i>pheno</i> tab (or its only tab) must contain a column named like the file
+channel, and the <b>File name column</b> is chosen among the other columns of that tab
+(<i>file_name</i> is proposed first, then <i>sample_id</i>). Without a mapping, files are identified by
+their number.</li>
+<li><b>Cluster channel</b>: integer channel holding the cluster. Proposed: first channel matching
+<i>cluster</i>, then <i>phenograph</i>, then <i>flowsom</i>.</li>
+<li><b>Cluster mapping (XLSX/CSV, optional)</b>: same two layouts. A file named like the cluster channel
+(e.g. <i>cluster_no.csv</i>) holds the number and the name in its first two columns. Otherwise an XLSX whose
+<i>clusters</i> tab (or only tab) has the columns <i>clustering_id</i>, <i>cluster_no</i> and
+<i>cluster_name</i>; the selected cluster channel must be listed in <i>clustering_id</i>, which is checked
+below the field. Without a mapping, clusters are identified by their number.</li>
+<li><b>Output tables</b>: XLSX and/or TSV.</li>
+<li><b>Split FCS mode</b>: <i>None</i> writes no FCS; <i>File</i> one FCS per file; <i>Cluster</i> one per
+cluster; <i>Cluster x File</i> one folder per cluster holding one FCS per file;
+<i>File x Cluster</i> one folder per file holding one FCS per cluster.</li>
+<li><b>Heatmap markers (MFI)</b>: markers shown in the cluster heatmap.</li>
+<li><b>Report markers (MFI)</b>: markers whose MFI is reported per cluster and file.</li>
+</ul>
+<p><b>Marker lists.</b> Markers are the channel marker names ($PnS) of the FCS file; channels without a
+marker name and the file and cluster channels are not listed. Click a marker to select or
+unselect it. <b>Copy</b> puts the selected markers on the clipboard, separated by tabs. <b>Paste</b> replaces
+the selection with the markers found in the clipboard (separated by tabs, new lines, commas or
+semicolons; names are matched without regard to case, and channel names are accepted too). Markers
+that are not in the file are reported next to the buttons. If nothing is selected, all markers are used.</p>
+<h4>Output</h4>
+<p>Every run is a <i>step</i>: a folder <i>&lt;id&gt;_&lt;label&gt;</i> inside the workspace, created automatically.
+The label is the one typed above the form, else the tool name. The step folder contains:</p>
+<ul>
+<li><i>reports/</i>: <i>&lt;name&gt;_tables.xlsx</i>, one XLSX file with one tab per table (if XLSX is checked),
+and/or <i>&lt;name&gt;_tables_tsv/</i> with one TSV per table (if TSV is checked);</li>
+<li><i>data/</i>: the split FCS files, to continue the analysis (see Split FCS mode);</li>
+<li><i>split_fcs_report.html</i>: a summary report; <i>console.log</i>, <i>run_parameters.json</i> and
+<i>session_info.txt</i>: what was run and how.</li>
+</ul>
+<p>All tables are 2D. Rows are identified by <i>cluster_no</i> and <i>cluster_name</i>.</p>
+<ul>
+<li><b>MFI cluster x marker</b> and <b>IQR cluster x marker</b>: median and interquartile range of the heatmap
+markers per cluster, all files pooled;</li>
+<li><b>Count cluster x file</b> and <b>Freq (%) cluster x file</b>: number of cells per cluster and file, and
+their percentage among the cells of each file;</li>
+<li><b>MFI (cluster x marker) x file</b>: median of the report markers, one row per cluster and marker
+combination, files as columns (empty when a cluster has no cell in a file).</li>
+</ul>
+

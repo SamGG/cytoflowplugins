@@ -1,0 +1,30 @@
+id = "split_fcs"
+name = "Split concatenated FCS"
+category = "FCS"
+tooltip = "Parse a concatenated, clustered FCS file, extract features and split cells into FCS files."
+version = "0.9.0"
+api_version = 3
+entry = "gui.py:SplitFcsTool"
+rmd = "script.Rmd"
+help = "help.html"
+
+[requires]
+app = "0.10.0"
+python = []
+r = ["rmarkdown", "jsonlite", "readxl", "writexl", "data.table"]   # CRAN
+bioc = ["flowCore"]                                    # Bioconductor
+
+# input files: lineage = produced by another step of the workspace (offers "From step…")
+[[inputs]]
+param = "fcs_file"
+kind = "fcs"
+lineage = true
+label = "Concatenated FCS file"
+
+[[inputs]]
+param = "file_map_file"
+kind = "table"
+
+[[inputs]]
+param = "cluster_map_file"
+kind = "table"
